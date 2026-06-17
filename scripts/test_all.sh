@@ -5,8 +5,8 @@ PROJECT_DIR="$(cd "${SCRIPTS_DIR}/.." && pwd)"
 
 cd "${SCRIPTS_DIR}"
 
-chmod +x get_hardware_info.sh
-./get_hardware_info.sh
+# chmod +x get_hardware_info.sh
+# ./get_hardware_info.sh
 
 self=$(basename "$0")
 for f in test_*.sh; do

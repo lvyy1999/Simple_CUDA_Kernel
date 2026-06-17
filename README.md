@@ -1,8 +1,23 @@
 # Simple_CUDA_Kernel
 
+## 项目说明
+
 本项目使用 CUDA 实现 VectorAdd、Matrix Transpose、Reduce、Softmax、GEMM 等基础算子并进行简单的测试
 
+## 运行方法
+
+本项目提供了简单的测试代码和脚本，运行命令如下：
+
+```bash
+git clone https://github.com/lvyy1999/Simple_CUDA_Kernel
+
+cd Simple_CUDA_Kernel/scripts
+chmod +x test_all.sh
+./test_all.sh
+```
+
 ## 目录结构
+
 ```text
 .
 ├── include(头文件) 
@@ -18,8 +33,11 @@
     ├── test_gemm.sh
     └── ......
 ```
+
 ## 测试环境
+
 本项目测试使用google的Colab平台，环境信息如下：
+
 ```text
 CPU Information
 ----------------------------------------
@@ -64,8 +82,11 @@ Built on Fri_Feb_21_20:23:50_PST_2025
 Cuda compilation tools, release 12.8, V12.8.93
 Build cuda_12.8.r12.8/compiler.35583870_0
 ```
+
 ## 测试结果
+
 每种算子测试均以 CPU 运行的结果作为基准，进行正确性校验和简单的性能比较，其中 GEMM 算子额外增加了和 cuBLAS 官方库的对比（禁用了Tensor Core），测试结果如下：
+
 ```text
 ==================== GEMM test start ====================
 Data type: A/B/C = half, accumulate = float
