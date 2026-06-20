@@ -707,6 +707,8 @@ Build cuda_12.8.r12.8/compiler.35583870_0
 每种算子测试均以 CPU 运行的结果作为基准，进行正确性校验和简单的性能比较，其中 GEMM 算子额外增加了和 cuBLAS 官方库的对比（禁用了Tensor Core），测试结果如下：
 
 ```text
+run: test_gemm.sh
+
 ==================== GEMM test start ====================
 Data type: A/B/C = half, accumulate = float
 Matrix size: A = 1024 x 1024, B = 1024 x 1024, C = 1024 x 1024
@@ -717,15 +719,24 @@ Running my kernel (v2)...
 Correctness checking vs CPU...
 Running my kernel (v3)...
 Correctness checking vs CPU...
+Running my kernel (v4)...
+Correctness checking vs CPU...
+Running my kernel (v5)...
+Correctness checking vs CPU...
+Running my kernel (v6)...
+Correctness checking vs CPU...
 Running cuBLAS GEMM...
 
 Benchmark analyzing...
-Cpu baseline: 9911.2158 ms, 0.22 GFLOPS
-My kernel (v1): 5.8062 ms, 369.86 GFLOPS, 1707.0x Speedup
-My kernel (v2): 3.7176 ms, 577.66 GFLOPS, 2666.1x Speedup
-My kernel (v3): 0.9398 ms, 2285.07 GFLOPS, 10546.2x Speedup
-Nvidia's cuBLAS GEMM: 0.4009 ms, 5356.97 GFLOPS, 24723.8x Speedup
-My best performance at v3, reach 42.66% of cuBLAS (No Tensor Core)
+Cpu baseline: 10101.5566 ms, 0.21 GFLOPS
+My kernel (v1): 4.9923 ms, 430.16 GFLOPS, 2023.4x Speedup
+My kernel (v2): 3.1976 ms, 671.59 GFLOPS, 3159.1x Speedup
+My kernel (v3): 0.8076 ms, 2659.17 GFLOPS, 12508.5x Speedup
+My kernel (v4): 0.8007 ms, 2681.89 GFLOPS, 12615.3x Speedup
+My kernel (v5): 0.7829 ms, 2743.15 GFLOPS, 12903.5x Speedup
+My kernel (v6): 0.6958 ms, 3086.29 GFLOPS, 14517.6x Speedup
+Nvidia's cuBLAS GEMM: 0.3153 ms, 6811.98 GFLOPS, 32042.9x Speedup
+My best performance at v6, reach 45.31% of cuBLAS (No Tensor Core)
 
 run: test_reduce.sh
 
@@ -742,15 +753,20 @@ Running my kernel (v4)...
 Correctness checking vs CPU...
 Running my kernel (v5)...
 Correctness checking vs CPU...
+Running my kernel (v6)...
+Correctness checking vs CPU...
+Running CUB reduce...
 
 Benchmark analyzing...
-Cpu baseline: 31.8616 ms, 0.53 GFLOPS, 2.11 GB/s
-My kernel (v1): 1.9418 ms, 8.64 GFLOPS, 34.56 GB/s, 16.4x Speedup
-My kernel (v2): 1.1644 ms, 14.41 GFLOPS, 57.64 GB/s, 27.4x Speedup
-My kernel (v3): 0.6142 ms, 27.32 GFLOPS, 109.26 GB/s, 51.9x Speedup
-My kernel (v4): 0.3772 ms, 44.48 GFLOPS, 177.92 GB/s, 84.5x Speedup
-My kernel (v5): 0.3386 ms, 49.54 GFLOPS, 198.18 GB/s, 94.1x Speedup
-My best performance at v5
+Cpu baseline: 28.5053 ms, 0.59 GFLOPS, 2.35 GB/s
+My kernel (v1): 1.5548 ms, 10.79 GFLOPS, 43.16 GB/s, 18.3x Speedup
+My kernel (v2): 0.9361 ms, 17.92 GFLOPS, 71.69 GB/s, 30.4x Speedup
+My kernel (v3): 0.4990 ms, 33.62 GFLOPS, 134.48 GB/s, 57.1x Speedup
+My kernel (v4): 0.3141 ms, 53.42 GFLOPS, 213.69 GB/s, 90.8x Speedup
+My kernel (v5): 0.2821 ms, 59.47 GFLOPS, 237.90 GB/s, 101.1x Speedup
+My kernel (v6): 0.2531 ms, 66.29 GFLOPS, 265.16 GB/s, 112.6x Speedup
+Nvidia's CUB reduce: 0.2582 ms, 64.97 GFLOPS, 259.89 GB/s, 110.4x Speedup
+My best performance at v6, reach 102.03% of CUB
 
 run: test_softmax.sh
 
@@ -767,11 +783,11 @@ Running my kernel (v4)...
 Correctness checking vs CPU...
 
 Benchmark analyzing...
-Cpu baseline: 227.1248 ms, 0.37 GFLOPS, 1.18 GB/s
-My kernel (v1): 71.1882 ms, 1.18 GFLOPS, 3.77 GB/s, 3.2x Speedup
-My kernel (v2): 71.2048 ms, 1.18 GFLOPS, 3.77 GB/s, 3.2x Speedup
-My kernel (v3): 50.3404 ms, 1.67 GFLOPS, 5.33 GB/s, 4.5x Speedup
-My kernel (v4): 50.4458 ms, 1.66 GFLOPS, 5.32 GB/s, 4.5x Speedup
+Cpu baseline: 227.9716 ms, 0.37 GFLOPS, 1.18 GB/s
+My kernel (v1): 71.2176 ms, 1.18 GFLOPS, 3.77 GB/s, 3.2x Speedup
+My kernel (v2): 71.1325 ms, 1.18 GFLOPS, 3.77 GB/s, 3.2x Speedup
+My kernel (v3): 50.2722 ms, 1.67 GFLOPS, 5.34 GB/s, 4.5x Speedup
+My kernel (v4): 50.3562 ms, 1.67 GFLOPS, 5.33 GB/s, 4.5x Speedup
 My best performance at v3
 
 run: test_transpose.sh
@@ -785,9 +801,9 @@ Running my kernel (v2)...
 Correctness checking vs CPU...
 
 Benchmark analyzing...
-Cpu baseline: 5.4201 ms, 1.55 GB/s
-My kernel (v1): 0.0722 ms, 116.22 GB/s, 75.1x Speedup
-My kernel (v2): 0.0494 ms, 169.66 GB/s, 109.6x Speedup
+Cpu baseline: 5.4457 ms, 1.54 GB/s
+My kernel (v1): 0.0825 ms, 101.72 GB/s, 66.0x Speedup
+My kernel (v2): 0.0535 ms, 156.79 GB/s, 101.8x Speedup
 My best performance at v2
 
 run: test_vector_add.sh
@@ -801,8 +817,9 @@ Running my kernel (v2)...
 Correctness checking vs CPU...
 
 Benchmark analyzing...
-Cpu baseline: 18.7105 ms, 0.90 GFLOPS, 10.76 GB/s
-My kernel (v1): 0.7747 ms, 21.66 GFLOPS, 259.89 GB/s, 24.2x Speedup
-My kernel (v2): 0.8076 ms, 20.77 GFLOPS, 249.29 GB/s, 23.2x Speedup
+Cpu baseline: 19.3255 ms, 0.87 GFLOPS, 10.42 GB/s
+My kernel (v1): 0.7703 ms, 21.78 GFLOPS, 261.36 GB/s, 25.1x Speedup
+My kernel (v2): 0.8344 ms, 20.11 GFLOPS, 241.27 GB/s, 23.2x Speedup
 My best performance at v1
+
 ```
