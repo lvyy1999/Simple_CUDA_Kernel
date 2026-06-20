@@ -5,9 +5,10 @@
 #include "reduce_v3.cuh"
 #include "reduce_v4.cuh"
 #include "reduce_v5.cuh"
+#include "reduce_v6.cuh"
 
-#define MAX_KERNEL_VERSION 5
+#define MAX_KERNEL_VERSION 6
 
 void (*kernel_funcs[])(const float* input, float* output, int N) = {
-	reduce_v1, reduce_v2, reduce_v3, reduce_v4, reduce_v5
+	reduce_v1, reduce_v2, reduce_v3, reduce_v4, reduce_v5, reduce_v6
 };

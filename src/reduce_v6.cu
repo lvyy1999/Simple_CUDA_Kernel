@@ -8,14 +8,18 @@ static inline __device__ float warp_reduce(float val) {
     return val;
 }
 
-__global__ void reduction_kernel_v5(const float* input, float* output, int N) {
+__global__ void reduction_kernel_v6(const float* input, float* output, int N) {
     int tid = threadIdx.x;
     int warp_id = tid / 32;
     int lane_id = tid % 32;
     int idx = blockIdx.x * blockDim.x + tid;
     
-    float val = (idx < N) ? input[idx] : 0.0f;
-    if(idx + blockDim.x * gridDim.x < N) val += input[idx + blockDim.x * gridDim.x];
+    // Grid Stride Loop
+    float val = 0.0f;
+    int stride = blockDim.x * gridDim.x;
+    for(int i = idx; i < N; i += stride) {
+        val += input[i];
+    }
 
     // 每个 warp 内进行规约
     val = warp_reduce(val);
@@ -33,9 +37,11 @@ __global__ void reduction_kernel_v5(const float* input, float* output, int N) {
     if(tid == 0) atomicAdd(output, val);
 }
 
-extern "C" void reduce_v5(const float* input, float* output, int N) {
+extern "C" void reduce_v6(const float* input, float* output, int N) {
     int threadsPerBlock = 256;
-    int blocksPerGrid = (N + threadsPerBlock * 2 - 1) / (threadsPerBlock * 2);
-    reduction_kernel_v5<<<blocksPerGrid, threadsPerBlock>>>(input, output, N);
+    int num_sms;
+    cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, 0);
+    int blocksPerGrid  = num_sms * 4;
+    reduction_kernel_v6<<<blocksPerGrid, threadsPerBlock>>>(input, output, N);
 }
 

@@ -2,7 +2,7 @@
 #include <cuda_runtime.h>
 
 template <int BLOCK_SIZE, int BM, int BN, int BK, int TM, int TN>
-__global__ void gemm_kernel_v3(const half* A, const half* B, half* C, int M, int N, int K, float alpha, float beta) {
+__global__ void gemm_kernel_v4(const half* A, const half* B, half* C, int M, int N, int K, float alpha, float beta) {
     __shared__ float As[BM][BK];
     __shared__ float Bs[BK][BN];
     
@@ -28,17 +28,21 @@ __global__ void gemm_kernel_v3(const half* A, const half* B, half* C, int M, int
     // 每个 thread 负责 C 中的 TM * TN 个元素
     // constexpr int TM = BM / C_BLOCK_ROWS; // 8
     // constexpr int TN = BN / C_BLOCK_COLS; // 8
+    float At[TM];
+    float Bt[TN];
     float Ct[TM][TN] = {0.0f};
 
     // 沿着 K 维度遍历
     for(int k0 = 0; k0 < K; k0 += BK) {
         // 读取 A 的一块
+        #pragma unroll
         for(int i = ra; i < BM; i += A_BLOCK_ROWS) {
             int r = r0 + i, c = k0 + ca;
             As[i][ca] = (r < M && c < K) ? __half2float(A[r * K + c]) : 0.0f;
         }
 
         // 读取 B 的一块
+        #pragma unroll
         for(int j = cb; j < BN; j += B_BLOCK_COLS) {
             int r = k0 + rb, c = c0 + j;
             Bs[rb][j] = (r < K && c < N) ? __half2float(B[r * N + c]) : 0.0f;
@@ -46,13 +50,20 @@ __global__ void gemm_kernel_v3(const half* A, const half* B, half* C, int M, int
 
         __syncthreads();
 
-        // 计算 As * Bs
+        // 用外积的方式计算，并提前取数据到寄存器，减少共享内存访问
         for(int k = 0; k < BK; k++) {
+            #pragma unroll
             for(int i = 0; i < TM; i++) {
-                int r = rc + i * C_BLOCK_ROWS;
+                At[i] = As[rc + i * C_BLOCK_ROWS][k];
+            }
+            #pragma unroll
+            for(int j = 0; j < TN; j++) {
+                Bt[j] = Bs[k][cc + j * C_BLOCK_COLS];
+            }
+            // 在寄存器上做外积
+            for(int i = 0; i < TM; i++) {
                 for(int j = 0; j < TN; j++) {
-                    int c = cc + j * C_BLOCK_COLS;
-                    Ct[i][j] += As[r][k] * Bs[k][c];
+                    Ct[i][j] += At[i] * Bt[j];
                 }
             }
         }
@@ -73,9 +84,9 @@ __global__ void gemm_kernel_v3(const half* A, const half* B, half* C, int M, int
     }
 }
 
-extern "C" void gemm_v3(const half* A, const half* B, half* C, int M, int N, int K, float alpha, float beta) {
+extern "C" void gemm_v4(const half* A, const half* B, half* C, int M, int N, int K, float alpha, float beta) {
     int threadsPerBlock = 256;
     dim3 blocksPerGrid((N + 128 - 1) / 128,
                        (M + 128 - 1) / 128); // BM = BN = 128
-    gemm_kernel_v3<256, 128, 128, 8, 8, 8><<<blocksPerGrid, threadsPerBlock>>>(A, B, C, M, N, K, alpha, beta);
+    gemm_kernel_v4<256, 128, 128, 8, 8, 8><<<blocksPerGrid, threadsPerBlock>>>(A, B, C, M, N, K, alpha, beta);
 }

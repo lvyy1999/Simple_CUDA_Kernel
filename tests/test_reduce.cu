@@ -2,6 +2,7 @@
 #include <cstdio>
 #include <chrono>
 #include <cstdlib>
+#include <cub/cub.cuh>
 #include <cuda_fp16.h>
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
@@ -91,6 +92,30 @@ int main() {
         check_reduce_result(h_output_cpu, h_output_gpu);
     }
 
+    // -------------- CUB ------------------
+    printf("Running CUB reduce...\n");
+    float* d_temp_storage = nullptr;
+    size_t temp_storage_bytes = 0;
+    // 计算需要的临时存储大小
+    cub::DeviceReduce::Sum(d_temp_storage, temp_storage_bytes, d_input, d_output, N);
+    // 分配临时存储
+    CUDA_CHECK(cudaMalloc(&d_temp_storage, temp_storage_bytes));
+    for(int i = 0; i < warmup; i++) {
+        CUDA_CHECK(cudaMemset(d_output, 0, sizeof(float)));
+        CUDA_CHECK(cub::DeviceReduce::Sum(d_temp_storage, temp_storage_bytes, d_input, d_output, N));
+    }
+    CUDA_CHECK(cudaDeviceSynchronize());
+    
+    float cub_ms = 0.0f;
+    GpuTimer timer;
+    for(int i = 0; i < repeat; i++) {
+        CUDA_CHECK(cudaMemset(d_output, 0, sizeof(float)));
+        timer.start();
+        CUDA_CHECK(cub::DeviceReduce::Sum(d_temp_storage, temp_storage_bytes, d_input, d_output, N));
+        cub_ms += timer.stop();
+    }
+    cub_ms /= repeat;
+
     printf("\nBenchmark analyzing...\n");
     double flops = static_cast<double>(N);
     double bytes = static_cast<double>(size);
@@ -106,10 +131,16 @@ int main() {
         printf("My kernel (v%d): %.4f ms, %.2f GFLOPS, %.2f GB/s, %.1fx Speedup\n", 
             i + 1, gpu_ms[i], gpu_gflops, gpu_bandwidth, cpu_ms / gpu_ms[i]);
     }
-    printf("My best performance at v%d\n", best + 1);
+    double cub_gflops = compute_gflops(flops, cub_ms);
+    double cub_bandwidth = compute_gbandwidth(bytes, cub_ms);
+    printf("Nvidia's CUB reduce: %.4f ms, %.2f GFLOPS, %.2f GB/s, %.1fx Speedup\n", 
+        cub_ms, cub_gflops, cub_bandwidth, cpu_ms / cub_ms);
+    printf("My best performance at v%d, reach %.2f%% of CUB\n", 
+        best + 1, cub_ms / gpu_ms[best] * 100.0);
 
     CUDA_CHECK(cudaFree(d_input));
     CUDA_CHECK(cudaFree(d_output));
+    CUDA_CHECK(cudaFree(d_temp_storage));
 
     free(h_input);
 

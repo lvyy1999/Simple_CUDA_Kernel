@@ -127,11 +127,10 @@ int main() {
         }
         CUDA_CHECK(cudaDeviceSynchronize());
 
-        CUDA_CHECK(cudaMemcpy(d_C, h_C, size_C, cudaMemcpyHostToDevice));
-
         float ms = 0.0;
         GpuTimer timer;
         for(int j = 0; j < repeat; j++) {
+            CUDA_CHECK(cudaMemcpy(d_C, h_C, size_C, cudaMemcpyHostToDevice));
             timer.start();
             kernel_funcs[i](d_A, d_B, d_C, M, N, K, alpha, beta);
             ms += timer.stop();
@@ -146,19 +145,24 @@ int main() {
     }
 
     // -------------- cuBLAS ------------------
+    printf("Running cuBLAS GEMM...\n");
     cublasHandle_t handle;
     CUBLAS_CHECK(cublasCreate(&handle));
     CUBLAS_CHECK(cublasSetMathMode(handle, CUBLAS_PEDANTIC_MATH));
     // CUBLAS_CHECK(cublasSetMathMode(handle, CUBLAS_TENSOR_OP_MATH));
-    run_cublas(handle, d_A, d_B, d_C, M, N, K, alpha, beta); // warm up
-    printf("Running cuBLAS GEMM...\n");
-    CUDA_CHECK(cudaMemcpy(d_C, h_C, size_C, cudaMemcpyHostToDevice));
-    GpuTimer timer;
-    timer.start();
-    for(int i = 0; i < repeat; i++) {
+    for(int i = 0; i < warmup; i++) {
         run_cublas(handle, d_A, d_B, d_C, M, N, K, alpha, beta);
     }
-    float cublas_ms = timer.stop() / repeat;
+
+    float cublas_ms = 0.0f;
+    GpuTimer timer;
+    for(int i = 0; i < repeat; i++) {
+        CUDA_CHECK(cudaMemcpy(d_C, h_C, size_C, cudaMemcpyHostToDevice));
+        timer.start();
+        run_cublas(handle, d_A, d_B, d_C, M, N, K, alpha, beta);
+        cublas_ms += timer.stop();
+    }
+    cublas_ms /= repeat;
 
     printf("\nBenchmark analyzing...\n");
     double flops = static_cast<double>(2.0) * M * N * K;
