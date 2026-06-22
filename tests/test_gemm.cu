@@ -80,8 +80,8 @@ int main() {
     int K = 1024;
     float alpha = 1.0f;
     float beta = 0.0f;
-    int warmup = 5; // gpu
-    int repeat = 5; // gpu
+    int warmup = 10; // gpu
+    int repeat = 10; // gpu
 
     printf("\n==================== GEMM test start ====================\n");
     printf("Data type: A/B/C = half, accumulate = float\n");
