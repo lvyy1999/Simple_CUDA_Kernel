@@ -2,7 +2,7 @@
 
 ## 项目说明
 
-本项目使用 CUDA 实现 VectorAdd、Matrix Transpose、Reduce、Softmax、GEMM 等基础算子并进行简单的测试
+本项目使用 CUDA 实现 VectorAdd、Matrix Transpose、Reduce、Softmax、GEMM、Attention 等算子并进行简单的测试
 
 ## 目录
 
@@ -22,6 +22,9 @@
 ├── src(算子实现) 
 │   ├── gemm_v1.cu
 │   └── ......
+├── docs(算子实现说明文档) 
+│   ├── gemm.md
+│   └── ......
 ├── tests(测试代码) 
 │   ├── test_gemm.cu
 │   └── ......
@@ -33,10 +36,16 @@
 ## 算子实现
 
 [Vector_Add](./docs/vector_add.md)
+
 [Transpose](./docs/transpose.md)
+
 [Reduce](./docs/reduce.md)
+
 [GEMM](./docs/gemm.md)
+
 [Softmax](./docs/softmax.md)
+
+[Attention](./docs/attention.md)
 
 ## 测试命令
 
