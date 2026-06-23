@@ -1,11 +1,24 @@
 #pragma once
 
-#include "reduce_v1.cuh"
-#include "reduce_v2.cuh"
-#include "reduce_v3.cuh"
-#include "reduce_v4.cuh"
-#include "reduce_v5.cuh"
-#include "reduce_v6.cuh"
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+void reduce_v1(const float* input, float* output, int N);
+
+void reduce_v2(const float* input, float* output, int N);
+
+void reduce_v3(const float* input, float* output, int N);
+
+void reduce_v4(const float* input, float* output, int N);
+
+void reduce_v5(const float* input, float* output, int N);
+
+void reduce_v6(const float* input, float* output, int N);
+
+#ifdef __cplusplus
+}
+#endif
 
 #define MAX_KERNEL_VERSION 6
 

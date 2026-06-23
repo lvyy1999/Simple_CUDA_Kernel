@@ -1,7 +1,16 @@
 #pragma once
 
-#include "vector_add_v1.cuh"
-#include "vector_add_v2.cuh"
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+void vector_add_v1(const float* A, const float* B, float* C, int N);
+
+void vector_add_v2(const float* A, const float* B, float* C, int N);
+
+#ifdef __cplusplus
+}
+#endif
 
 #define MAX_KERNEL_VERSION 2
 

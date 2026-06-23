@@ -1,9 +1,20 @@
 #pragma once
 
-#include "softmax_v1.cuh"
-#include "softmax_v2.cuh"
-#include "softmax_v3.cuh"
-#include "softmax_v4.cuh"
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+void softmax_v1(const float* input, float* output, int N);
+
+void softmax_v2(const float* input, float* output, int N);
+
+void softmax_v3(const float* input, float* output, int N);
+
+void softmax_v4(const float* input, float* output, int N);
+
+#ifdef __cplusplus
+}
+#endif
 
 #define MAX_KERNEL_VERSION 4
 

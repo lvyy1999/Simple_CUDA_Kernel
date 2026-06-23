@@ -1,11 +1,26 @@
 #pragma once
 
-#include "gemm_v1.cuh"
-#include "gemm_v2.cuh"
-#include "gemm_v3.cuh"
-#include "gemm_v4.cuh"
-#include "gemm_v5.cuh"
-#include "gemm_v6.cuh"
+#include <cuda_fp16.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+void gemm_v1(const half* A, const half* B, half* C, int M, int N, int K, float alpha, float beta);
+
+void gemm_v2(const half* A, const half* B, half* C, int M, int N, int K, float alpha, float beta);
+
+void gemm_v3(const half* A, const half* B, half* C, int M, int N, int K, float alpha, float beta);
+
+void gemm_v4(const half* A, const half* B, half* C, int M, int N, int K, float alpha, float beta);
+
+void gemm_v5(const half* A, const half* B, half* C, int M, int N, int K, float alpha, float beta);
+
+void gemm_v6(const half* A, const half* B, half* C, int M, int N, int K, float alpha, float beta);
+
+#ifdef __cplusplus
+}
+#endif
 
 #define MAX_KERNEL_VERSION 6
 
