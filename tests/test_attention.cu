@@ -27,7 +27,7 @@ void run_cpu(
         for(int j = 0; j < N; j++) {
             float sum = 0.0f;
             for(int k = 0; k < d; k++) {
-                sum += Q[i * N + k] * K[j * d + k];
+                sum += Q[i * d + k] * K[j * d + k];
             }
             S[i * N + j] = sum / sqrtf(d);
         }
@@ -69,9 +69,9 @@ void run_cpu(
 // ============================================================
 
 int main() {
-    int M = 1024;
-    int N = 1024;
-    int d = 1024;
+    int M = 4096;
+    int N = 4096;
+    int d = 128;
     int warmup = 10; // gpu
     int repeat = 10; // gpu
 
