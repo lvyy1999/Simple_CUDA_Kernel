@@ -1,7 +1,5 @@
 #include <cuda_runtime.h>
 
-#include "../include/vector_add_v1.cuh"
-
 __global__ void vector_add_kernel_v1(const float* A, const float* B, float* C, int N) {
     int idx = blockDim.x * blockIdx.x + threadIdx.x;
     if (idx < N) {

@@ -1,7 +1,5 @@
 #include <cuda_runtime.h>
 
-#include "../include/vector_add_v2.cuh"
-
 __global__ void vector_add_kernel_v2(const float* A, const float* B, float* C, int N) {
     int idx = blockDim.x * blockIdx.x + threadIdx.x;
     int stride = blockDim.x * gridDim.x;
