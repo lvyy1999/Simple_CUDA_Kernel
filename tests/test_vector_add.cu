@@ -27,13 +27,13 @@ void run_cpu(
 // ============================================================
 
 int main() {
-    int N = 1 << 24;
+    int N = 1 << 26;
     int warmup = 10; // gpu
     int repeat = 10; // gpu
 
     printf("\n==================== Vector add test start ====================\n");
     printf("Data type: float, Vector size: N = %d, Bytes: %d MB\n", 
-        N, N << 2 >> 20);
+        N, N >> 20 << 2);
 
     size_t size = static_cast<size_t>(N) * sizeof(float);
 
