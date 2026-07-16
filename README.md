@@ -28,8 +28,8 @@
 
 - 覆盖 Vector Add、Transpose、Reduce、Softmax、GEMM 和 Attention 6 类常见算子，共实现 24 个渐进式 CUDA Kernel 版本。
 - 系统实践合并访存、`float4`/`Half4` 向量化加载、shared memory tiling、padding、寄存器分块、warp shuffle 和 online softmax 等优化方法。
-- 为每类算子提供 CPU reference、GPU warmup、CUDA Event 计时和正确性检查；GEMM、Reduce 分别使用 cuBLAS、CUB 作为性能参考。
-- 最新 Tesla T4 测试中，GEMM v5 达到禁用 Tensor Core 后 cuBLAS 的 67.61%，Reduce v6 达到 CUB 的 95.39%，Attention v4 达到 841.04 GFLOPS。
+- 为每类算子提供 CPU reference、GPU warmup、CUDA Event 计时和正确性检查；GEMM 使用 `cublasGemmEx`、Reduce 使用 `cub::DeviceReduce::Sum` 作为性能参考。
+- 最新 Tesla T4 测试中，GEMM v5 达到禁用 Tensor Core 后 `cublasGemmEx` 的 67.61%，Reduce v6 达到 `cub::DeviceReduce::Sum` 的 102.30%，Attention v4 达到 841.04 GFLOPS。
 
 ## 已实现算子
 
@@ -69,7 +69,7 @@ chmod +x test_all.sh test_*.sh
 ./test_gemm.sh sm_86
 ```
 
-每个测试程序会先运行 CPU baseline，再依次运行 `kernel_funcs[]` 中注册的 CUDA kernel，并将 GPU 输出与 CPU 输出做正确性检查。GEMM 额外对比禁用 Tensor Core 后的 cuBLAS，Reduce 额外对比 CUB。
+每个测试程序会先运行 CPU baseline，再依次运行 `kernel_funcs[]` 中注册的 CUDA kernel，并将 GPU 输出与 CPU 输出做正确性检查。GEMM 额外对比 cuBLAS 的 `cublasGemmEx` 接口，Reduce 额外对比 CUB 的设备级求和接口 `cub::DeviceReduce::Sum`。
 
 当前测试规模：
 
@@ -102,8 +102,8 @@ Optimization: -O3
 | 算子 | 最佳版本 | 核心结果 | 对比结果 |
 | --- | --- | --- | --- |
 | Attention | v4 | 10.3332 ms，841.04 GFLOPS | 相比 v1 提升 4.62x |
-| GEMM | v5 | 0.4636 ms，4.63 TFLOPS | cuBLAS（禁用 Tensor Core）的 67.61% |
-| Reduce | v6 | 0.2715 ms，247.19 GB/s | CUB 的 95.39% |
+| GEMM | v5 | 0.4636 ms，4.63 TFLOPS | `cublasGemmEx`（禁用 Tensor Core）的 67.61% |
+| Reduce | v6 | 0.2538 ms，264.46 GB/s | `cub::DeviceReduce::Sum` 的 102.30% |
 | Softmax | v3 | 50.4927 ms，5.32 GB/s | 当前自定义最优 |
 | Transpose | v2 | 0.0537 ms，156.16 GB/s | 当前自定义最优 |
 | Vector Add | v1 | 3.0502 ms，264.02 GB/s | 当前自定义最优 |
@@ -129,24 +129,24 @@ Optimization: -O3
 | v4 | 0.5510 | 3897.15 | 19441.4x | 寄存器复用 |
 | v5 | 0.4636 | 4631.81 | 23106.3x | 当前自定义最优，转置存储 + `float4` + padding |
 | v6 | 0.4946 | 4341.51 | 21658.2x | shared half + global `Half4` 加载 |
-| cuBLAS | 0.3135 | 6850.36 | 34173.9x | 禁用 Tensor Core |
+| cuBLAS `cublasGemmEx` | 0.3135 | 6850.36 | 34173.9x | FP16 输入/输出、FP32 累加，禁用 Tensor Core |
 
-自定义最佳版本为 v5，达到 cuBLAS 的 67.61%。
+自定义最佳版本为 v5，达到 `cublasGemmEx` 的 67.61%。参考测试的 A/B/C 数据类型均为 `CUDA_R_16F`，计算类型为 `CUDA_R_32F`，并通过 `CUBLAS_PEDANTIC_MATH` 限制数学模式；handle 创建和 warmup 不计入 CUDA Event 计时。
 
 ### Reduce
 
 | 实现 | Time (ms) | GFLOPS | Bandwidth (GB/s) | Speedup vs CPU | 备注 |
 | --- | ---: | ---: | ---: | ---: | --- |
-| CPU baseline | 31.8732 | 0.53 | 2.11 | 1.0x | CPU 参考实现 |
-| v1 | 1.6468 | 10.19 | 40.75 | 19.4x | 朴素树形归约 |
-| v2 | 0.9943 | 16.87 | 67.49 | 32.1x | 反向步长 |
-| v3 | 0.5313 | 31.58 | 126.31 | 60.0x | 每线程读取两个元素 |
-| v4 | 0.3341 | 50.22 | 200.89 | 95.4x | 展开最后一个 warp |
-| v5 | 0.3000 | 55.93 | 223.70 | 106.2x | warp shuffle |
-| v6 | 0.2715 | 61.80 | 247.19 | 117.4x | 当前自定义最优，grid-stride loop |
-| CUB | 0.2590 | 64.79 | 259.15 | 123.1x | 官方库参考 |
+| CPU baseline | 30.4657 | 0.55 | 2.20 | 1.0x | CPU 参考实现 |
+| v1 | 1.5781 | 10.63 | 42.53 | 19.3x | 朴素树形归约 |
+| v2 | 0.9501 | 17.66 | 70.63 | 32.1x | 反向步长 |
+| v3 | 0.5064 | 33.13 | 132.53 | 60.2x | 每线程读取两个元素 |
+| v4 | 0.3186 | 52.67 | 210.67 | 95.6x | 展开最后一个 warp |
+| v5 | 0.2867 | 58.51 | 234.05 | 106.3x | warp shuffle |
+| v6 | 0.2538 | 66.11 | 264.46 | 120.1x | 当前自定义最优，grid-stride loop |
+| CUB `DeviceReduce::Sum` | 0.2596 | 64.63 | 258.51 | 117.4x | CUB 官方设备级求和接口 |
 
-自定义最佳版本为 v6，达到 CUB 的 95.39%。
+自定义最佳版本为 v6，达到 `cub::DeviceReduce::Sum` 的 102.30%。测试程序先以空临时存储调用该接口查询所需空间，完成分配后再执行 warmup 和 CUDA Event 计时。
 
 ### Softmax
 
@@ -186,5 +186,5 @@ Optimization: -O3
 ## 说明
 
 - 本仓库以学习 CUDA 优化路径为主，代码优先展示不同优化技巧的影响，而不是追求生产级通用算子库。
-- GEMM 的自定义 kernel 和 cuBLAS 对比均未使用 Tensor Core；测试代码通过 `CUBLAS_PEDANTIC_MATH` 禁用 cuBLAS Tensor Core 路径。
+- GEMM 的自定义 kernel 和 `cublasGemmEx` 对比均未使用 Tensor Core；测试代码通过 `CUBLAS_PEDANTIC_MATH` 禁用 cuBLAS Tensor Core 路径。
 - Attention v3 支持 `d <= 128`；v4 针对 `d == 128` 的固定 head dimension 进行专门优化。
