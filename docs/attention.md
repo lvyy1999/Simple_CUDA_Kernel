@@ -1,355 +1,198 @@
-## Attention
+# Attention
 
-### v1 : naive版
+Attention 计算过程为：
 
-朴素实现，分三步完成计算，第一步计算 S = QK^T/d ，第二步计算 P = Softmax(S) ， 第三步计算 O = PV ，分别实现三步中的算子，依次调用
-源码：[attention_v1.cu](../src/attention_v1.cu)
+```text
+S = Q * K^T / sqrt(d)
+P = softmax(S)
+O = P * V
+```
+
+当前实现为单头 dense attention，输入输出布局如下：
+
+- `Q: [M, d]`
+- `K: [N, d]`
+- `V: [N, d]`
+- `output: [M, d]`
+
+- 测试入口：[`tests/test_attention.cu`](../tests/test_attention.cu)
+- 头文件：[`include/attention.cuh`](../include/attention.cuh)
+- 当前注册版本：v1-v4，共 4 个版本
+
+## v1：三个 Kernel 的朴素实现
+
+源码：[`src/attention_v1.cu`](../src/attention_v1.cu)
+
+v1 将 attention 拆成三个 CUDA kernel：
+
+1. `qkt_kernel`：计算 `S = QK^T / sqrt(d)`
+2. `softmax_kernel`：逐行计算 `P = softmax(S)`
+3. `pv_kernel`：计算 `O = PV`
 
 ```cpp
-#include <cuda_runtime.h>
-#include <float.h>
+qkt_kernel<<<grid_qkt, block_qkt>>>(Q, K, S, M, N, d);
+softmax_kernel<<<M, 256, 256 * sizeof(float)>>>(S, P, M, N);
+pv_kernel<<<grid_pv, block_pv>>>(P, V, output, M, N, d);
+```
 
-__global__ void qkt_kernel(const float* Q, const float* K, float* S, int M, int N, int d) {
-    int col = blockDim.x * blockIdx.x + threadIdx.x;
-    int row = blockDim.y * blockIdx.y + threadIdx.y;
-    if(row >= M || col >= N) return;
+特点：
 
+- 结构清晰，最容易和数学公式对应。
+- 需要额外分配 `S` 和 `P` 两个 `M x N` 中间矩阵。
+- `S`、`P` 都会写入并重新读取全局内存，显存流量较大。
+- 适合作为 correctness baseline，不是面向高性能的实现。
+
+## v2：单 Kernel 融合
+
+源码：[`src/attention_v2.cu`](../src/attention_v2.cu)
+
+v2 将 `QK^T -> softmax -> PV` 融合到一个 kernel 中。每个 block 负责一个 query 行，先将该行的 `N` 个 score 放入动态 shared memory，再完成 softmax 和 V 的加权求和。
+
+```cpp
+extern __shared__ float scores[];
+
+for (int j = tid; j < N; j += blockDim.x) {
     float sum = 0.0f;
-    for(int k = 0; k < d; k++) {
-        sum += Q[row * d + k] * K[col * d + k];
+    for (int k = 0; k < d; k++) {
+        sum += Q[row * d + k] * K[j * d + k];
     }
-    S[row * N + col] = sum / sqrtf(d);
+    scores[j] = sum * rsqrtf(d);
 }
-
-__global__ void softmax_kernel(const float* S, float* P, int M, int N) {
-    extern __shared__ float smem[];
-
-    int row = blockIdx.x;
-    if(row >= M) return;
-    
-    int tid = threadIdx.x;
-
-    float maxVal = -FLT_MAX;
-    for(int j = tid; j < N; j += blockDim.x) {
-        maxVal = fmaxf(maxVal, S[row * N + j]);
-    }
-    smem[tid] = maxVal;
-    __syncthreads();
-
-    for(int s = blockDim.x / 2; s > 0; s >>= 1) {
-        if(tid < s) smem[tid] = fmaxf(smem[tid], smem[tid + s]);
-        __syncthreads();
-    }
-    maxVal = smem[0];
-    __syncthreads();
-
-    float sumExp = 0.0f;
-    for(int j = tid; j < N; j += blockDim.x) {
-        sumExp += expf(S[row * N + j] - maxVal);
-    }
-    smem[tid] = sumExp;
-    __syncthreads();
-    
-    for(int s = blockDim.x / 2; s > 0; s >>= 1) {
-        if(tid < s) smem[tid] += smem[tid + s];
-        __syncthreads();
-    }
-    sumExp = smem[0];
-    __syncthreads();
-
-    for(int j = tid; j < N; j += blockDim.x) {
-        P[row * N + j] = expf(S[row * N + j] - maxVal) / sumExp;
-    }
-}
-
-__global__ void pv_kernel(const float* P, const float* V, float* output, int M, int N, int d) {
-    int col = blockDim.x * blockIdx.x + threadIdx.x;
-    int row = blockDim.y * blockIdx.y + threadIdx.y;
-    if(row >= M || col >= d) return;
-
-    float sum = 0.0f;
-    for (int k = 0; k < N; k++) {
-        sum += P[row * N + k] * V[k * d + col];
-    }
-    output[row * d + col] = sum;
-}
-
-extern "C" void attention_v1(const float* Q, const float* K, const float* V, float* output, int M, int N, int d) {
-    float *S, *P;
-    cudaMalloc(&S, M * N * sizeof(float));
-    cudaMalloc(&P, M * N * sizeof(float));
-
-    dim3 block_qkt(16, 16);
-    dim3 grid_qkt((N + block_qkt.x - 1) / block_qkt.x,
-                  (M + block_qkt.y - 1) / block_qkt.y);
-    qkt_kernel<<<grid_qkt, block_qkt>>>(Q, K, S, M, N, d);
-    cudaDeviceSynchronize();
-
-    softmax_kernel<<<M, 256, 256 * sizeof(float)>>>(S, P, M, N);
-    cudaDeviceSynchronize();
-
-    dim3 block_pv(16, 16);
-    dim3 grid_pv((d + block_pv.x - 1) / block_pv.x,
-                 (M + block_pv.y - 1) / block_pv.y);
-    pv_kernel<<<grid_pv, block_pv>>>(P, V, output, M, N, d);
-    cudaDeviceSynchronize();
-
-    cudaFree(S);
-    cudaFree(P);
-}
-
 ```
 
-## v2 : kernel 融合
+特点：
 
-将v1中的三个kernel融合为一个kernel，每个block负责一行，中间数据放在共享内存，减少对HBM显存的占用
-源码：[attention_v2.cu](../src/attention_v2.cu)
+- 不再将完整的 `S` 和 `P` 写回全局内存。
+- 减少了 kernel launch 次数。
+- 每个 block 只处理一行 query，block 间并行度由 `M` 决定。
+- 每个 block 需要约 `N * sizeof(float)` 的动态 shared memory，因此可支持的 `N` 受设备 shared memory 上限约束。
+
+简单地融合三个阶段并不等价于 FlashAttention。v2 减少了中间结果的全局内存流量，但没有对 K/V 进行分块复用，shared memory 需求还会随 `N` 线性增长。
+
+## v3：分块 Attention + Online Softmax
+
+源码：[`src/attention_v3.cu`](../src/attention_v3.cu)
+
+v3 按 query block 和 key/value block 分块。每个 block 处理 8 行 query，每个 warp 对应一行 query；K/V 以 32 行为一块进行扫描，并使用 online softmax 累积结果。
+
+当前启动参数：
 
 ```cpp
-#include <math.h>
-#include <float.h>
-#include <cuda_runtime.h>
-
-__device__ float warp_reduce_max(float m) {
-    #pragma unroll
-    for(int offset = 16; offset > 0; offset >>= 1) {
-        m = fmaxf(m, __shfl_down_sync(0xFFFFFFFF, m, offset));
-    }
-    return m;
-}
-
-__device__ float warp_reduce_sum(float s) {
-    #pragma unroll
-    for(int offset = 16; offset > 0; offset >>= 1) {
-        s += __shfl_down_sync(0xFFFFFFFF, s, offset);
-    }
-    return s;
-}
-
-__device__ float block_reduce_max(float m) {
-    int tid = threadIdx.x;
-    int warp_id = tid / 32;
-    int lane_id = tid % 32;
-
-    m = warp_reduce_max(m);
-
-    __shared__ float smem[32];
-    if(lane_id == 0) smem[warp_id] = m;
-    __syncthreads();
-
-    int num_warps = blockDim.x / 32;
-    m = (tid < num_warps) ? smem[tid] : -FLT_MAX;
-    if(warp_id == 0) {
-        m = warp_reduce_max(m);
-        if(lane_id == 0) smem[0] = m;
-    };
-    __syncthreads();
-
-    m = smem[0];
-    return m;
-}
-
-__device__ float block_reduce_sum(float s) {
-    int tid = threadIdx.x;
-    int warp_id = tid / 32;
-    int lane_id = tid % 32;
-
-    s = warp_reduce_sum(s);
-
-    __shared__ float smem[32];
-    if(lane_id == 0) smem[warp_id] = s;
-    __syncthreads();
-
-    int num_warps = blockDim.x / 32;
-    s = (tid < num_warps) ? smem[tid] : 0.0f;
-    if(warp_id == 0) {
-        s = warp_reduce_sum(s);
-        if(lane_id == 0) smem[0] = s;
-    }
-    __syncthreads();
-
-    s = smem[0];
-    return s;
-}
-
-__global__ void attention_kernel_v2(const float* Q, const float* K, const float* V, float* output, int M, int N, int d) {
-    extern __shared__ float scores[];
-
-    int row = blockIdx.x;
-    if(row >= M) return;
-    int tid = threadIdx.x;
-
-    float m = -FLT_MAX;
-    float scale = rsqrtf(d);
-    for(int j = tid; j < N; j += blockDim.x) {
-        float sum = 0.0f;
-        for(int k = 0; k < d; k++) {
-            sum += Q[row * d + k] * K[j * d + k];
-        }
-        sum *= scale;
-        scores[j] = sum;
-        m = fmaxf(m, sum);
-    }
-    __syncthreads();
-
-    m = block_reduce_max(m);
-
-    float s = 0.0f;
-    for(int j = tid; j < N; j += blockDim.x) {
-        s += expf(scores[j] - m);
-    }
-
-    s = block_reduce_sum(s);
-    
-    for(int j = tid; j < d; j += blockDim.x) {
-        float sum = 0.0f;
-        for(int k = 0; k < N; k++) {
-            sum += V[k * d + j] * expf(scores[k] - m) / s;
-        }
-        output[row * d + j] = sum;
-    }
-}
-
-extern "C" void attention_v2(const float* Q, const float* K, const float* V, float* output, int M, int N, int d) {
-    attention_kernel_v2<<<M, 256, N * sizeof(float)>>>(Q, K, V, output, M, N, d);
-}
-
+constexpr int BM = 8;
+constexpr int BN = 32;
+constexpr int BD = 128;
+constexpr int BLOCK_SIZE = 256;
 ```
 
-## v3 : 矩阵分块
+shared memory 中保存：
 
-利用矩阵分块和共享内存增加数据复用，减少全局内存读取
-源码：[attention_v3.cu](../src/attention_v3.cu)
+- `Qs[BM * BD]`：当前 8 行 Q
+- `Ks[BN * BD]`、`Vs[BN * BD]`：当前 32 行 K/V
+- `S[BM * BN]`：当前 score tile
+- `o[BM * BD]`：未归一化的输出累积
+- `m[BM]`、`l[BM]`：每一行的最大值和 softmax 分母
+
+online softmax 的目标更新公式为：
 
 ```cpp
-#include <math.h>
-#include <float.h>
-#include <stdio.h>
-#include <cuda_runtime.h>
+float m_new = fmaxf(m_old, m_cur);
+float alpha = expf(m_old - m_new);
+float l_new = l_old * alpha + l_cur;
 
-#define BM 4
-#define BN 32
-#define MAX_D 128
-#define THREADS 256
-
-__global__ void attention_kernel_v3(const float* Q, const float* K, const float* V, float* output, int M, int N, int d) {
-    __shared__ float Qs[BM * MAX_D];
-    __shared__ float Ks[BN * MAX_D];
-    __shared__ float Vs[BN * MAX_D];
-    __shared__ float S[BM * BN];
-    __shared__ float o[BM * MAX_D];
-    __shared__ float m[BM];
-    __shared__ float l[BM];
-
-    int rq = blockIdx.x * BM;
-    int tid = threadIdx.x;
-
-    // load Q
-    for(int i = tid; i < BM * d; i += blockDim.x) {
-        int rb = i / d;
-        int cb = i % d;
-        int r = rq + rb;
-        Qs[rb * MAX_D + cb] = r < M ? Q[r * d + cb] : 0.0f;
-        o[rb * MAX_D + cb] = 0.0f;
-    }
-
-    if (tid < BM) {
-        int r = rq + tid;
-        m[tid] = r < M ? -FLT_MAX : 0.0f;
-        l[tid] = r < M ? 0.0f : 1.0f;
-    }
-    __syncthreads();
-
-    float scale = rsqrtf(d);
-    for(int rkv = 0; rkv < N; rkv += BN) {
-        // load K / V
-        for(int i = tid; i < BN * d; i += blockDim.x) {
-            int rb = i / d;
-            int cb = i % d;
-            int r = rkv + rb;
-            Ks[rb * MAX_D + cb] = r < N ? K[r * d + cb] : 0.0f;
-            Vs[rb * MAX_D + cb] = r < N ? V[r * d + cb] : 0.0f;
-        }
-        __syncthreads();
-
-        // compute S = Q * K^T
-        for(int i = tid; i < BM * BN; i += blockDim.x) {
-            int rb = i / BN;
-            int cb = i % BN;
-            int r = rq + rb;
-            int c = rkv + cb;
-            float sum = 0.0f;
-            if(r < M && c < N) {
-                for(int j = 0; j < d; j++) {
-                    sum += Qs[rb * MAX_D + j] * Ks[cb * MAX_D + j];
-                }
-            }
-            S[rb * BN + cb] = sum * scale;
-        }
-        __syncthreads();
-
-        int rb = tid / BN;
-        int cb = tid % BN;
-        if(rb < BM) {
-            int r = rq + rb;
-            int c = rkv + cb;
-            if(r < M && c < N) {
-                float m_old = m[rb];
-                float l_old = l[rb];
-
-                float m_cur = S[rb * BN + cb];
-                #pragma unroll
-                for(int offset = 16; offset > 0; offset >>= 1) {
-                    m_cur = fmaxf(m_cur, __shfl_down_sync(0xFFFFFFFF, m_cur, offset));
-                }
-                m_cur = __shfl_sync(0xFFFFFFFF, m_cur, 0);
-                float m_new = fmaxf(m_old, m_cur);
-                float old_scale = expf(m_old - m_new);
-                float l_cur = expf(S[rb * BN + cb] - m_new);
-                #pragma unroll
-                for(int offset = 16; offset > 0; offset >>= 1) {
-                    l_cur += __shfl_down_sync(0xFFFFFFFF, l_cur, offset);
-                }
-                l_cur = __shfl_sync(0xFFFFFFFF, l_cur, 0);
-                float l_new = l_old * old_scale + l_cur;
-
-                for(int j = cb; j < d; j += BN) {
-                    float o_old = o[rb * MAX_D + j];
-                    float o_cur = 0.0f;
-                    for(int k = 0; k < BN && rkv + k < N; k++) {
-                        o_cur += expf(S[rb * BN + k] - m_new) * Vs[k * MAX_D + j];
-                    }
-                    o[rb * MAX_D + j] = o_old * old_scale + o_cur;
-                }
-
-                if(cb == 0) {
-                    m[rb] = m_new;
-                    l[rb] = l_new;
-                }
-            }
-        }
-        __syncthreads();
-    }
-
-    for(int i = tid; i < BM * d; i += blockDim.x) {
-        int rb = i / d;
-        int cb = i % d;
-        int r = rq + rb;
-        if(r < M) {
-            output[r * d + cb] = o[rb * MAX_D + cb] / l[rb];
-        }
-    }
-}
-
-extern "C" void attention_v3(const float* Q, const float* K, const float* V, float* output, int M, int N, int d) {
-    if(d > MAX_D) {
-        printf("only supports d <= %d\n", MAX_D);
-        return;
-    }
-    int threadsPerBlock = THREADS;
-    int blocksPerGrid = ((M + BM - 1) / BM);
-    attention_kernel_v3<<<blocksPerGrid, threadsPerBlock>>>(Q, K, V, output, M, N, d);
-}
-
-
+o_new = o_old * alpha + o_cur;
 ```
+
+特点：
+
+- 不再显式保存完整的 `M x N` score/probability 矩阵。
+- K/V 按 tile 载入 shared memory，避免 v2 中 shared memory 随 `N` 增长。
+- online softmax 允许在逐块扫描 K/V 时保持全局归一化语义。
+- 启动器支持 `d <= 128`，但 tile 存储按 `BD = 128` 固定分配。
+
+### v3 当前已知问题
+
+当前源码中的 `alpha` 使用了未定义变量 `m_i`：
+
+```cpp
+float alpha = cb == 0 ? expf(m_i - m_new) : 0.0f;
+```
+
+这里应使用该行已经读取的旧最大值 `m_old`。在修正前，v3 会阻止完整测试程序通过编译。
+
+此外，v3 只在 `c < N` 的线程中执行使用 `0xFFFFFFFF` mask 的 warp shuffle，并由这些线程分别更新输出列。当 `N` 不是 32 的整数倍时，最后一个 K/V tile 的部分 lane 不参与 shuffle，也不会更新其负责的输出列。因此当前 v3 只能在 `N % 32 == 0` 时保证这条路径完整，默认测试的 `N = 4096` 会掩盖该问题。
+
+## v4：一行一个 Warp + 向量化加载
+
+源码：[`src/attention_v4.cu`](../src/attention_v4.cu)
+
+v4 保留分块和 online softmax，但重新组织了线程职责：
+
+- 一个 block 包含 8 个 warp，处理 8 行 query。
+- 一个 warp 的 32 个 lane 共同处理一行 query。
+- K/V tile 大小为 `BN = 32`，head dimension 固定为 `BD = 128`。
+- 每个 lane 最终在寄存器数组 `acc[4]` 中保存 4 个输出元素。
+
+当前启动参数：
+
+```cpp
+constexpr int BM = 8;
+constexpr int BN = 32;
+constexpr int BD = 128;
+constexpr int BLOCK_SIZE = BM * BN;  // 256 threads
+```
+
+### v4 的主要优化
+
+1. **Q/K/V 全局内存向量化加载**
+
+   每个 lane 使用一次 `float4` 读取连续 4 个 FP32 元素。32 个 lane 正好覆盖一行 128 个元素，减少 load 指令数量，并形成连续合并访存。
+
+2. **K 的 shared memory Padding**
+
+   ```cpp
+   __shared__ float Ks[BN][BD + 1];
+   ```
+
+   K 在计算 `QK^T` 时会被 warp 按列方向读取。末维增加一个元素可以改变相邻行的起始 bank，缓解访问固定列时的 shared memory bank conflict。
+
+3. **Online Softmax 状态保存在寄存器**
+
+   每个 warp 使用寄存器变量 `m_i`、`l_i` 维护对应 query 行的 softmax 状态，输出部分累积在 `acc[4]` 中，减少 v3 对 shared memory 状态的访问。
+
+4. **每个概率只计算一次**
+
+   当前 tile 的未归一化概率先写入 `P[BM][BN]`，同一 warp 再复用这些值完成 `P * V`，避免为不同输出列重复调用 `expf`。
+
+5. **正确屏蔽 N 的尾块**
+
+   超出 `N` 的 lane 将 `score` 设为 `-FLT_MAX`、将 `p` 设为 0，但整个 warp 仍参与 shuffle 和输出累积，因此 v4 可以处理 `N` 不是 32 整数倍的情况。
+
+### v4 使用约束
+
+- 启动器明确要求 `d == 128`，其他 head dimension 会直接返回。
+- `float4` 读取要求地址满足 16 字节对齐。测试中的 `cudaMalloc` 地址满足基础对齐要求，且 `d = 128` 使每一行起始地址继续保持 16 字节对齐。
+- 当前实现使用 38,016 字节（约 37.1 KiB）静态 shared memory，适用于默认每 block 至少支持 48 KiB shared memory 的目标设备。
+- 仍然使用 CUDA Core 完成 FP32 乘加，没有使用 Tensor Core。
+
+## 当前测试
+
+[`tests/test_attention.cu`](../tests/test_attention.cu) 当前固定使用：
+
+- `M = 4096`
+- `N = 4096`
+- `d = 128`
+- GPU warmup 10 次，计时重复 10 次
+- 使用 CPU attention 结果逐版本检查正确性
+- 估算计算量为 `4MNd + 6MN`
+
+头文件会依次注册并测试 v1-v4。由于 v3 仍有未定义变量，当前直接编译全部 `src/attention_v*.cu` 时会先遇到 v3 编译错误；文档中的 v4 结构说明来自静态代码核对，本地未进行 CUDA 编译与 2080 Ti 运行验证。
+
+## 后续优化方向
+
+- 使用 `half2`、Tensor Core 或 WMMA 加速 `QK^T` 和 `PV`，同时保留 FP32 softmax 与累积以控制误差。
+- 用 warp-level MMA 重新设计 tile，避免当前逐元素 FP32 点积吞吐不足。
+- 对 `expf`、寄存器数量、shared memory bank conflict 和 occupancy 使用 Nsight Compute 做定量分析。
+- 为 `M`、`N` 和 `d` 增加参数化测试，覆盖 `M % 8 != 0`、`N % 32 != 0`、小尺寸以及 v4 不支持的 head dimension。
+- 在 2080 Ti 上单独记录最新代码的结果，不与 README 中其他 GPU 或旧实现的历史数据直接混用。
+
+v3 解决了 v2 的中间矩阵和 shared memory 随 `N` 增长问题；v4 则进一步将计算映射到 warp、向量化全局内存访问，并把 softmax 与输出状态移入寄存器，是当前更适合作为后续优化基础的版本。

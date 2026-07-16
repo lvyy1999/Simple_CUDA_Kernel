@@ -1,209 +1,168 @@
-## GEMM
+# GEMM
 
-### v1 : naive版
+GEMM 计算：
 
-源码：[gemm_v1.cu](../src/gemm_v1.cu)
-
-```cpp
-__global__ void gemm_kernel_v1(const half* A, const half* B, half* C, int M, int N, int K, float alpha, float beta) {
-    int row = blockIdx.y * blockDim.y + threadIdx.y;
-    int col = blockIdx.x * blockDim.x + threadIdx.x;
-    if (row < M && col < N) {
-        float sum = 0.0f;
-        for (int k = 0; k < K; ++k) {
-            float a = __half2float(A[row * K + k]);
-            float b = __half2float(B[k * N + col]);
-            sum += a * b;
-        }
-        float c_val = (beta != 0.0f) ? __half2float(C[row * N + col]) * beta : 0.0f;
-        C[row * N + col] = __float2half_rn(sum * alpha + c_val);
-    }
-}
+```text
+C = alpha * A * B + beta * C
 ```
 
-### v2 : block 级分块
+当前实现使用 `half` 输入/输出，内部用 `float` 累加，没有使用 Tensor Core。测试中的 cuBLAS 对比也通过 `CUBLAS_PEDANTIC_MATH` 禁用了 Tensor Core 路径，因此这个文档关注 CUDA Core 路径下的分块、shared memory、寄存器复用、向量化加载和 bank conflict 优化。
 
-将矩阵A和B分块读入共享内存，然后在共享内存中计算矩阵乘，增加数据复用，减少全局内存访问
-源码：[gemm_v2.cu](../src/gemm_v2.cu)
+- 测试入口：[`tests/test_gemm.cu`](../tests/test_gemm.cu)
+- 头文件：[`include/gemm.cuh`](../include/gemm.cuh)
+- 当前版本数：6
+- 参考库：cuBLAS GEMM
 
-```cpp
-#define TILE_SIZE 16
+## v1: 朴素 GEMM
 
-__global__ void gemm_kernel_v2(const half* A, const half* B, half* C, int M, int N, int K, float alpha, float beta) {
-    __shared__ float As[TILE_SIZE][TILE_SIZE];
-    __shared__ float Bs[TILE_SIZE][TILE_SIZE];
+源码：[`src/gemm_v1.cu`](../src/gemm_v1.cu)
 
-    int row = blockIdx.y * TILE_SIZE + threadIdx.y;
-    int col = blockIdx.x * TILE_SIZE + threadIdx.x;
-
-    float sum = 0.0f;
-    for(int t = 0; t < (K + TILE_SIZE - 1) / TILE_SIZE; t++) {
-        int aCol = t * TILE_SIZE + threadIdx.x;
-        int bRow = t * TILE_SIZE + threadIdx.y;
-        As[threadIdx.y][threadIdx.x] = (row < M && aCol < K) ? __half2float(A[row * K + aCol]) : 0.0f;
-        Bs[threadIdx.y][threadIdx.x] = (bRow < K && col < N) ? __half2float(B[bRow * N + col]) : 0.0f;
-        __syncthreads();
-
-        for(int k = 0; k < TILE_SIZE; k++) {
-            sum += As[threadIdx.y][k] * Bs[k][threadIdx.x];
-        }
-        __syncthreads();
-    }
-
-    if(row < M && col < N) {
-        float c_val = (beta != 0.0f) ? __half2float(C[row * N + col]) * beta : 0.0f;
-        C[row * N + col] = __float2half_rn(sum * alpha + c_val);
-    }
-}
-```
-
-### v3 : thread 级分块
-
-每个线程负责更多数据，在寄存器上存储中间结果
-源码：[gemm_v3.cu](../src/gemm_v3.cu)
+每个线程计算 `C` 的一个元素，沿 `K` 维循环累加。
 
 ```cpp
-template <int BLOCK_SIZE, int BM, int BN, int BK, int TM, int TN>
-__global__ void gemm_kernel_v3(const half* A, const half* B, half* C, int M, int N, int K, float alpha, float beta) {
-    __shared__ float As[BM][BK];
-    __shared__ float Bs[BK][BN];
-    
-    int tid = threadIdx.x;
-    int r0 = blockIdx.y * BM;
-    int c0 = blockIdx.x * BN;
-
-    // 处理 A 时，block 内重排为 32 * 8，分四次读 A 的一块(128 * 8)
-    constexpr int A_BLOCK_COLS = BK; // 8
-    constexpr int A_BLOCK_ROWS = BLOCK_SIZE / A_BLOCK_COLS; // 32
-    int ra = tid / A_BLOCK_COLS, ca = tid % A_BLOCK_COLS;
-
-    // 处理 B 时，block 内重排为 8 * 32，分四次读 B 的一块(8 * 128)
-    constexpr int B_BLOCK_ROWS = BK; // 8
-    constexpr int B_BLOCK_COLS = BLOCK_SIZE / B_BLOCK_ROWS; // 32
-    int rb = tid / B_BLOCK_COLS, cb = tid % B_BLOCK_COLS;
-
-    // 处理 C 时，block 内重排为 16 * 16
-    constexpr int C_BLOCK_ROWS = 16;
-    constexpr int C_BLOCK_COLS = BLOCK_SIZE / C_BLOCK_ROWS;
-    int rc = tid / 16, cc = tid % 16;
-    
-    // 每个 thread 负责 C 中的 TM * TN 个元素
-    // constexpr int TM = BM / C_BLOCK_ROWS; // 8
-    // constexpr int TN = BN / C_BLOCK_COLS; // 8
-    float Ct[TM][TN] = {0.0f};
-
-    // 沿着 K 维度遍历
-    for(int k0 = 0; k0 < K; k0 += BK) {
-        // 读取 A 的一块
-        for(int i = ra; i < BM; i += A_BLOCK_ROWS) {
-            int r = r0 + i, c = k0 + ca;
-            As[i][ca] = (r < M && c < K) ? __half2float(A[r * K + c]) : 0.0f;
-        }
-
-        // 读取 B 的一块
-        for(int j = cb; j < BN; j += B_BLOCK_COLS) {
-            int r = k0 + rb, c = c0 + j;
-            Bs[rb][j] = (r < K && c < N) ? __half2float(B[r * N + c]) : 0.0f;
-        }
-
-        __syncthreads();
-
-        // 计算 As * Bs
-        for(int k = 0; k < BK; k++) {
-            for(int i = 0; i < TM; i++) {
-                int r = rc + i * C_BLOCK_ROWS;
-                for(int j = 0; j < TN; j++) {
-                    int c = cc + j * C_BLOCK_COLS;
-                    Ct[i][j] += As[r][k] * Bs[k][c];
-                }
-            }
-        }
-
-        __syncthreads();
-    }
-
-    // write C
-    for(int i = 0; i < TM; i++) {
-        int r = r0 + i * C_BLOCK_ROWS + rc;
-        for(int j = 0; j < TN; j++) {
-            int c = c0 + j * C_BLOCK_COLS + cc;
-            if(r < M && c < N) {
-                float c_val = (beta != 0.0f) ? __half2float(C[r * N + c]) * beta : 0.0f;
-                C[r * N + c] = __float2half_rn(Ct[i][j] * alpha + c_val);
-            }
-        } 
-    }
+float sum = 0.0f;
+for (int k = 0; k < K; ++k) {
+    float a = __half2float(A[row * K + k]);
+    float b = __half2float(B[k * N + col]);
+    sum += a * b;
 }
+C[row * N + col] = __float2half_rn(sum * alpha + c_val);
 ```
 
-### v4 : 外积分解 + 寄存器级复用
+特点：
 
-先将共享内存数据搬运到寄存器，再在寄存器上做外积，增加数据复用
-源码：[gemm_v4.cu](../src/gemm_v4.cu)
+- 实现简单，作为 correctness baseline。
+- A/B 的数据复用完全依赖 cache，性能较低。
+
+## v2: Block 级 Shared Memory 分块
+
+源码：[`src/gemm_v2.cu`](../src/gemm_v2.cu)
+
+将 A 和 B 的 tile 搬到 shared memory，再在 tile 内计算。
+
+```cpp
+__shared__ float As[TILE_SIZE][TILE_SIZE];
+__shared__ float Bs[TILE_SIZE][TILE_SIZE];
+```
+
+收益：
+
+- 减少对全局内存的重复访问。
+- 让一个 tile 中的数据被多个线程复用。
+
+## v3: 线程级分块
+
+源码：[`src/gemm_v3.cu`](../src/gemm_v3.cu)
+
+每个线程不再只计算一个 `C` 元素，而是计算一个 `TM x TN` 的小块，并把中间结果保存在寄存器中。
+
+```cpp
+float Ct[TM][TN] = {0.0f};
+```
+
+收益：
+
+- 增加每个线程的计算工作量。
+- 提高 A/B tile 数据在寄存器和 shared memory 中的复用率。
+- 明显提升算术强度。
+
+## v4: 外积分解 + 寄存器复用
+
+源码：[`src/gemm_v4.cu`](../src/gemm_v4.cu)
+
+将 shared memory 中的 A/B 片段先加载到寄存器 `At`、`Bt`，再做外积更新 `Ct`。
 
 ```cpp
 float At[TM];
 float Bt[TN];
-float Ct[TM][TN] = {0.0f};    
 
-for(int k = 0; k < BK; k++) {
-    #pragma unroll
-    for(int i = 0; i < TM; i++) {
-        At[i] = As[rc + i * C_BLOCK_ROWS][k];
-    }
-    #pragma unroll
-    for(int j = 0; j < TN; j++) {
-        Bt[j] = Bs[k][cc + j * C_BLOCK_COLS];
-    }
-    // 在寄存器上做外积
-    for(int i = 0; i < TM; i++) {
-        for(int j = 0; j < TN; j++) {
+for (int k = 0; k < BK; k++) {
+    for (int i = 0; i < TM; i++) At[i] = As[rc + i * C_BLOCK_ROWS][k];
+    for (int j = 0; j < TN; j++) Bt[j] = Bs[k][cc + j * C_BLOCK_COLS];
+
+    for (int i = 0; i < TM; i++) {
+        for (int j = 0; j < TN; j++) {
             Ct[i][j] += At[i] * Bt[j];
         }
     }
 }
 ```
 
-### v5 : 转置存储 + 向量化加载
+收益：
 
-将 A 转置存储到 As，Bs 保持不变，然后在加载共享内存到寄存器时，使用 float4 向量化加载，减少访存指令数量
-源码：[gemm_v5.cu](../src/gemm_v5.cu)
+- 减少 repeated shared memory load。
+- 用寄存器承接更细粒度的数据复用。
+
+## v5: A 转置存储 + `float4` + Padding
+
+源码：[`src/gemm_v5.cu`](../src/gemm_v5.cu)
+
+当前 v5 使用 `BM = 128`、`BN = 128`、`BK = 16`，每个 block 启动 256 个线程，每个线程计算 `8 x 8` 个输出。A tile 以转置布局写入 shared memory，并增加 4 列 padding；shared memory 到寄存器的搬运使用 `float4`。
 
 ```cpp
 #define FLOAT4(ptr) (reinterpret_cast<float4*>(&(ptr))[0])
 
-__shared__ float As[BK][BM]; // 转置存储As
+__shared__ float As[BK][BM + 4];
 
-As[ca][i] = (r < M && c < K) ? __half2float(A[r * K + c]) : 0.0f; // As 行列互换
-
-// 向量化加载共享内存
-for(int i = 0; i < TM; i += 4) { 
-    FLOAT4(At[i]) = FLOAT4(As[k][4 * rc + (i / 4) * 4 * C_BLOCK_ROWS]); 
-}
-for(int j = 0; j < TN; j += 4) {
-    FLOAT4(Bt[j]) = FLOAT4(Bs[k][4 * cc + (j / 4) * 4  * C_BLOCK_COLS]);
-}
-
-// 写回时行列计算方式相应改变
-for(int i = 0; i < TM; i++) {
-    int r = r0 + 4 * rc + (i / 4) * 4 * C_BLOCK_ROWS + i % 4;
-    for(int j = 0; j < TN; j++) {
-        int c = c0 + 4 * cc + (j / 4) * 4 * C_BLOCK_COLS + j % 4;
-        if(r < M && c < N) {
-            float c_val = (beta != 0.0f) ? __half2float(C[r * N + c]) * beta : 0.0f;
-            C[r * N + c] = __float2half_rn(Ct[i][j] * alpha + c_val);
-        }
-    } 
-}
+FLOAT4(At[i]) = FLOAT4(As[k][4 * rc + i * C_BLOCK_ROWS]);
+FLOAT4(Bt[j]) = FLOAT4(Bs[k][4 * cc + j * C_BLOCK_COLS]);
 ```
 
-### v6 : Padding
+收益：
 
-对 As 添加padding，减少 Bank Conflict
-源码：[gemm_v6.cu](../src/gemm_v6.cu)
+- 降低访存指令数量。
+- 改善 shared memory 到寄存器的数据搬运效率。
+- 通过 `BM + 4` 的行跨度缓解 A tile 的 shared memory bank conflict。
+- v5 仍保留 M/N/K 的边界判断，可以处理非整 tile 的矩阵尺寸。
+
+## v6: Shared Half + Global `Half4` 加载
+
+源码：[`src/gemm_v6.cu`](../src/gemm_v6.cu)
+
+当前 v6 使用 `BM = 128`、`BN = 128`、`BK = 32`。A/B 在 shared memory 中改为 `half`，同时通过一个 8 字节对齐的 `Half4` 联合体从 global memory 一次加载 4 个连续 `half`。
 
 ```cpp
+union __align__(8) Half4 {
+    uint2 packed;
+    half values[4];
+};
 
-__shared__ float As[BK][BM + 4]; // 转置存储As，并添加padding
+__shared__ half As[BK][BM + 4];
+__shared__ half Bs[BK][BN];
 
+value.packed = *reinterpret_cast<const uint2*>(ptr);
 ```
+
+加载 A 时，4 个连续的 K 维元素在 shared memory 中被转置写入；加载 B 时则保持按行布局。计算阶段再通过 `__half2float` 转换为 `float` 并做 FP32 累加。
+
+特点：
+
+- global memory 加载宽度从单个 `half` 提升到 4 个 `half`。
+- shared memory 使用 `half`，在 `BK` 从 16 增加到 32 后，总 shared memory 仍约为 16.25 KiB。
+- `BK = 32` 减少沿 K 维迭代时的 block 级同步次数。
+- 计算仍然走 CUDA Core 的 FP32 FMA，没有使用 Tensor Core。
+
+v6 是对齐尺寸专用的快速路径。launcher 明确要求：
+
+```text
+M % 128 == 0
+N % 128 == 0
+K % 32 == 0
+```
+
+kernel 内的 global load 和 C 写回没有边界判断；不满足约束时 launcher 会打印提示并直接返回。`Half4` 加载还依赖 A/B 起始地址满足 8 字节对齐，当前测试中的 `cudaMalloc` 能满足该要求。
+
+## 当前测试
+
+`tests/test_gemm.cu` 中默认：
+
+- `M = 1024`
+- `N = 1024`
+- `K = 1024`
+- GPU warmup 10 次，计时重复 10 次
+- 使用 CPU GEMM 结果做 correctness check
+- 额外运行禁用 Tensor Core 后的 cuBLAS GEMM 作为参考
+
+注意：当前自定义 GEMM 没有使用 Tensor Core，测试代码也通过 `cublasSetMathMode(handle, CUBLAS_PEDANTIC_MATH)` 禁用了 cuBLAS Tensor Core 路径；性能对比主要用于观察手写 CUDA Core kernel 和 cuBLAS CUDA Core 路径之间的差距。
+
+README 中保存的 T4 历史结果早于当前 v5/v6 的参数和存储布局调整，不能直接视为这两个最新实现的性能。重新测试时应单独记录 GPU 型号、编译架构和 `ptxas` 的寄存器/spill 信息；Tesla T4 与 RTX 2080 Ti 都使用 `sm_75`，但两张卡的 SM 数量、频率和显存带宽不同，结果不应混在同一组表格中。

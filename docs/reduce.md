@@ -1,115 +1,139 @@
-## Reduce
+# Reduce
 
-### v1 : naive版
+Reduce 将长度为 `N` 的数组规约为一个标量和。这个算子适合观察线程同步、warp divergence、shared memory bank conflict、warp shuffle 和 grid-stride loop 对性能的影响。
 
-采用树形规约，最后每个 block 内的 thread 0 将 block 内的规约结果原子加到输出
-源码：[reduce_v1.cu](../src/reduce_v1.cu)
+- 测试入口：[`tests/test_reduce.cu`](../tests/test_reduce.cu)
+- 头文件：[`include/reduce.cuh`](../include/reduce.cuh)
+- 当前版本数：6
+- 参考库：CUB reduce
 
-```cpp
-__global__ void reduction_kernel_v1(const float* input, float* output, int N) {
-    extern __shared__ float smem[];
+## v1: 朴素树形归约
 
-    int tid = threadIdx.x;
-    int idx = blockIdx.x * blockDim.x + tid;
-    smem[tid] = (idx < N) ? input[idx] : 0.0f;
-    __syncthreads();
+源码：[`src/reduce_v1.cu`](../src/reduce_v1.cu)
 
-    // 朴素树形规约
-    for(int s = 1; s < blockDim.x; s <<= 1) {
-        if(tid % (2 * s) == 0) {
-            smem[tid] += smem[tid + s];
-        }
-        __syncthreads();
-    }
-
-    if(tid == 0) atomicAdd(output, smem[0]);
-}
-```
-
-### v2 : 反转步长
-
-反转规约时的步长方向，减少 Warp Divergence 和 Bank Conflict
-源码：[reduce_v2.cu](../src/reduce_v2.cu)
+每个 block 在 shared memory 中做树形归约，最后由 `thread 0` 通过 `atomicAdd` 写入全局输出。
 
 ```cpp
-for(int s = blockDim.x / 2; s > 0; s >>= 1) {
-    if(tid < s) {
+for (int s = 1; s < blockDim.x; s <<= 1) {
+    if (tid % (2 * s) == 0) {
         smem[tid] += smem[tid + s];
     }
     __syncthreads();
 }
 ```
 
-### v3 : 减少空闲线程
+问题：
 
-每个线程负责读取两个数据，block 数量减半，大幅减少空闲线程
-源码：[reduce_v3.cu](../src/reduce_v3.cu)
+- `tid % (2 * s)` 会造成明显 warp divergence。
+- 早期步长下 shared memory 访问模式不够友好。
+- 每一轮都需要 block 级同步。
+
+## v2: 反向步长归约
+
+源码：[`src/reduce_v2.cu`](../src/reduce_v2.cu)
+
+将归约步长从 `blockDim.x / 2` 逐步减半，让活跃线程集中在前半段。
+
+```cpp
+for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+    if (tid < s) {
+        smem[tid] += smem[tid + s];
+    }
+    __syncthreads();
+}
+```
+
+收益：
+
+- 分支条件更简单。
+- 活跃线程更集中，减少 warp divergence。
+- shared memory 访问更规整。
+
+## v3: 每线程读取两个元素
+
+源码：[`src/reduce_v3.cu`](../src/reduce_v3.cu)
+
+每个线程先从全局内存读取两个元素并相加，再进入 block 内归约。
 
 ```cpp
 smem[tid] = (idx < N) ? input[idx] : 0.0f;
-smem[tid] += (idx + blockDim.x * gridDim.x < N) ? input[idx + blockDim.x * gridDim.x] : 0.0f;
-
-int blocksPerGrid = (N + 2 * threadsPerBlock - 1) / (2 * threadsPerBlock);
+smem[tid] += (idx + blockDim.x * gridDim.x < N)
+    ? input[idx + blockDim.x * gridDim.x]
+    : 0.0f;
 ```
 
-### v4 : 展开最后一个 warp
+收益：
 
-树形规约只处理到步长大于32的部分，当步长小于等于32时，活跃线程只剩第一个 warp 内的线程，改用 warp内的同步原语进行规约，更高效且无需全局线程等待
-源码：[reduce_v4.cu](../src/reduce_v4.cu)
+- block 数量约减半。
+- 减少空闲线程和原子写回次数。
+- 提高每个线程的工作量。
+
+## v4: 展开最后一个 warp
+
+源码：[`src/reduce_v4.cu`](../src/reduce_v4.cu)
+
+block 级归约只做到 `s > 32`，最后一个 warp 内使用 shuffle 完成归约。
 
 ```cpp
-for(int s = blockDim.x / 2; s > 32; s >>= 1) {
-    if(tid < s) {
-        smem[tid] += smem[tid + s];
-    }
-    __syncthreads();
-}
-
-if(tid < 32) {
+if (tid < 32) {
     float val = smem[tid] + smem[tid + 32];
-    #pragma unroll
-    for(int offset = 16; offset > 0; offset >>= 1) {
+    for (int offset = 16; offset > 0; offset >>= 1) {
         val += __shfl_down_sync(0xFFFFFFFF, val, offset);
     }
-    if(tid == 0) atomicAdd(output, val);
+    if (tid == 0) atomicAdd(output, val);
 }
 ```
 
-### v5 : warp shuffle
+收益：
 
-全部使用 warp shuffle 替代朴素树形规约，由于 warp 数量最大为32(1024 / 32 = 32)，开辟大小为32的共享内存 smem，第 i 个 warp 将 warp 内的规约结果写到 smem[i]，再由第一个 warp 对 smem 进行规约
-源码：[reduce_v5.cu](../src/reduce_v5.cu)
+- 最后一个 warp 内不再需要 `__syncthreads()`。
+- 减少 shared memory 往返。
 
-```cpp 
-int tid = threadIdx.x;
-int warp_id = tid / 32;
-int lane_id = tid % 32;
+## v5: Warp Shuffle 分层归约
 
-// 每个 warp 内进行规约
+源码：[`src/reduce_v5.cu`](../src/reduce_v5.cu)
+
+每个 warp 先用 shuffle 得到局部和，再把每个 warp 的结果写入 shared memory，最后由第一个 warp 汇总。
+
+```cpp
 val = warp_reduce(val);
-
-// 每个 warp 内的 lane 0 将结果写入共享内存
-__shared__ float warp_sum[32]; // 最多 32 个 warp
-if(lane_id == 0) warp_sum[warp_id] = val;
+if (lane_id == 0) warp_sum[warp_id] = val;
 __syncthreads();
 
-// 最终结果由 warp 0 负责规约
-int num_warps = blockDim.x / 32;
 val = (tid < num_warps) ? warp_sum[tid] : 0.0f;
-if(warp_id == 0) val = warp_reduce(val);
-
-if(tid == 0) atomicAdd(output, val);
+if (warp_id == 0) val = warp_reduce(val);
 ```
 
-### v6 : Grid Stride Loop
+收益：
 
-采用固定 grid 大小，每个线程采用跳步循环覆盖整个数组
-源码：[reduce_v6.cu](../src/reduce_v6.cu)
+- 大部分规约在寄存器和 warp 内通信中完成。
+- shared memory 只保存每个 warp 的部分和。
 
-```cpp 
+## v6: Grid-Stride Loop
+
+源码：[`src/reduce_v6.cu`](../src/reduce_v6.cu)
+
+固定 grid 大小，每个线程用 grid-stride loop 覆盖多个输入元素。
+
+```cpp
 float val = 0.0f;
 int stride = blockDim.x * gridDim.x;
-for(int i = idx; i < N; i += stride) {
+for (int i = idx; i < N; i += stride) {
     val += input[i];
 }
 ```
+
+收益：
+
+- 减少过多 block 带来的调度和原子写压力。
+- 每个线程累加更多元素，提升访存和指令效率。
+- 历史 T4 测试中 v6 已略快于 CUB 结果。
+
+## 当前测试
+
+`tests/test_reduce.cu` 中默认：
+
+- `N = 1 << 24`
+- GPU warmup 10 次，计时重复 10 次
+- 使用 CPU 结果做 correctness check
+- 额外运行 CUB reduce 作为参考
