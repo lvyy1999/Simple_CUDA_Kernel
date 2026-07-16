@@ -76,7 +76,7 @@ __global__ void attention_kernel_v3(const float* Q, const float* K, const float*
                 }
                 m_cur = __shfl_sync(0xFFFFFFFF, m_cur, 0);
                 float m_new = fmaxf(m_old, m_cur);
-                float alpha = cb == 0 ? expf(m_i - m_new) : 0.0f;
+                float alpha = cb == 0 ? expf(m_old - m_new) : 0.0f;
                 alpha = __shfl_sync(0xFFFFFFFF, alpha, 0);
                 float l_cur = expf(S[rb * BN + cb] - m_new);
                 #pragma unroll
