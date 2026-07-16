@@ -123,18 +123,18 @@ int main() {
     double cpu_bandwidth = compute_gbandwidth(bytes, cpu_ms);
     printf("Cpu baseline: %.4f ms, %.2f GFLOPS, %.2f GB/s\n", 
         cpu_ms, cpu_gflops, cpu_bandwidth);
+    double cub_gflops = compute_gflops(flops, cub_ms);
+    double cub_bandwidth = compute_gbandwidth(bytes, cub_ms);
+    printf("Nvidia CUB: %.4f ms, %.2f GFLOPS, %.2f GB/s, %.1fx Speedup vs CPU\n", 
+        cub_ms, cub_gflops, cub_bandwidth, cpu_ms / cub_ms);
     int best = 0;
     for(int i = 0; i < MAX_KERNEL_VERSION; i++) {
         if(gpu_ms[i] < gpu_ms[best]) best = i;
         double gpu_gflops = compute_gflops(flops, gpu_ms[i]);
         double gpu_bandwidth = compute_gbandwidth(bytes, gpu_ms[i]);;
-        printf("My kernel (v%d): %.4f ms, %.2f GFLOPS, %.2f GB/s, %.1fx Speedup\n", 
-            i + 1, gpu_ms[i], gpu_gflops, gpu_bandwidth, cpu_ms / gpu_ms[i]);
+        printf("My kernel (v%d): %.4f ms, %.2f GFLOPS, %.2f GB/s, %.1fx Speedup vs CPU, %.2f%% of CUB\n", 
+            i + 1, gpu_ms[i], gpu_gflops, gpu_bandwidth, cpu_ms / gpu_ms[i], cub_ms / gpu_ms[i] * 100.0);
     }
-    double cub_gflops = compute_gflops(flops, cub_ms);
-    double cub_bandwidth = compute_gbandwidth(bytes, cub_ms);
-    printf("Nvidia's CUB reduce: %.4f ms, %.2f GFLOPS, %.2f GB/s, %.1fx Speedup\n", 
-        cub_ms, cub_gflops, cub_bandwidth, cpu_ms / cub_ms);
     printf("My best performance at v%d, reach %.2f%% of CUB\n", 
         best + 1, cub_ms / gpu_ms[best] * 100.0);
 

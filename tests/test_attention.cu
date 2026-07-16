@@ -136,7 +136,7 @@ int main() {
     }
 
     printf("\nBenchmark analyzing...\n");
-    double flops = static_cast<double>(4 * M * N * d + 6 * M * N);
+    double flops = static_cast<double>(4.0 * M * N * d + 6.0 * M * N);
     double cpu_gflops = compute_gflops(flops, cpu_ms);
     printf("Cpu baseline: %.4f ms, %.2f GFLOPS\n", 
         cpu_ms, cpu_gflops);

@@ -169,16 +169,17 @@ int main() {
     double cpu_gflops = compute_gflops(flops, cpu_ms);
     printf("Cpu baseline: %.4f ms, %.2f GFLOPS\n", 
         cpu_ms, cpu_gflops);
+    double cublas_gflops = compute_gflops(flops, cublas_ms);
+    printf("Nvidia cuBLAS: %.4f ms, %.2f GFLOPS, %.1fx Speedup vs CPU\n", 
+        cublas_ms, cublas_gflops, cpu_ms / cublas_ms);
     int best = 0;
     for(int i = 0; i < MAX_KERNEL_VERSION; i++) {
         if(gpu_ms[i] < gpu_ms[best]) best = i;
         double gpu_gflops = compute_gflops(flops, gpu_ms[i]);
-        printf("My kernel (v%d): %.4f ms, %.2f GFLOPS, %.1fx Speedup\n", 
-            i + 1, gpu_ms[i], gpu_gflops, cpu_ms / gpu_ms[i]);
+        printf("My kernel (v%d): %.4f ms, %.2f GFLOPS, %.1fx Speedup vs CPU, %.2f%% of cuBLAS (No Tensor Core)\n", 
+            i + 1, gpu_ms[i], gpu_gflops, cpu_ms / gpu_ms[i], gpu_gflops / cublas_gflops * 100.0);
     }
-    double cublas_gflops = compute_gflops(flops, cublas_ms);
-    printf("Nvidia's cuBLAS GEMM: %.4f ms, %.2f GFLOPS, %.1fx Speedup\n", 
-        cublas_ms, cublas_gflops, cpu_ms / cublas_ms);
+    
     double my_best_gflops = compute_gflops(flops, gpu_ms[best]);
     printf("My best performance at v%d, reach %.2f%% of cuBLAS (No Tensor Core)\n", 
         best + 1, my_best_gflops / cublas_gflops * 100.0);
