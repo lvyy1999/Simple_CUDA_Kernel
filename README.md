@@ -89,6 +89,7 @@ chmod +x test_all.sh test_*.sh
 ```text
 Platform: Google Colab
 GPU: Tesla T4, 16 GB
+CPU: Intel(R) Xeon(R) CPU @ 2.00GHz
 Compile target: sm_75
 Optimization: -O3
 ```
